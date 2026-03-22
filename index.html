@@ -329,6 +329,28 @@ const getDayNameFromDate = (dateStr) => {
   return d.toLocaleDateString('en-US', { weekday: 'long' });
 };
 
+// Parse time string like "8:00 AM", "1:00 PM", "11 AM", "13:00" to minutes since midnight
+const parseTimeToMinutes = (timeStr) => {
+  if (!timeStr) return 9999;
+  const t = timeStr.trim().toUpperCase();
+  const ampm = t.match(/(\d{1,2}):?(\d{2})?\s*(AM|PM)/i);
+  if (ampm) {
+    let h = parseInt(ampm[1]); const m = parseInt(ampm[2] || '0'); const period = ampm[3].toUpperCase();
+    if (period === 'PM' && h !== 12) h += 12; if (period === 'AM' && h === 12) h = 0;
+    return h * 60 + m;
+  }
+  const h24 = t.match(/(\d{1,2}):(\d{2})/);
+  if (h24) return parseInt(h24[1]) * 60 + parseInt(h24[2]);
+  const justH = t.match(/^(\d{1,2})\s*(AM|PM)?/i);
+  if (justH) {
+    let h = parseInt(justH[1]);
+    if (justH[2]?.toUpperCase() === 'PM' && h !== 12) h += 12;
+    if (justH[2]?.toUpperCase() === 'AM' && h === 12) h = 0;
+    return h * 60;
+  }
+  return 9999;
+};
+
 const parseMealCSV = (text) => {
   const lines = text.split('\n').filter(l => l.trim());
   if (lines.length < 2) return { weeklyMealPlans: {}, mealPlan: {}, errors: ['Empty file'], rowCount: 0, hasDateColumn: false };
@@ -362,7 +384,7 @@ const parseMealCSV = (text) => {
     // Sort meals by time within each day
     for (const wk of Object.values(weeklyMealPlans)) {
       for (const day of Object.values(wk)) {
-        day.meals.sort((a, b) => (a.time||'').localeCompare(b.time||''));
+        day.meals.sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time));
       }
     }
     const weekCount = Object.keys(weeklyMealPlans).length;
@@ -522,7 +544,7 @@ function App() {
   // Clear transient state on day/week change
   useEffect(() => {
     setEditingId(null); setExpandedId(null); setConfirmDelete(null);
-    setEditingMealId(null); setExpandedMealId(null); setConfirmMealDelete(null);
+    setEditingMealId(null); setExpandedMealId(null); setConfirmMealDelete(null); setConfirmDeleteAllMeals(false);
   }, [selectedDay, weekOffset]);
 
   // Escape key
@@ -654,13 +676,47 @@ function App() {
     showToast(followed ? `All ${day} meals marked as followed` : `All ${day} meals unmarked`);
   };
 
+  // Delete all meals for a specific day
+  const [confirmDeleteAllMeals, setConfirmDeleteAllMeals] = useState(false);
+  const [confirmResetAllMeals, setConfirmResetAllMeals] = useState(false);
+
+  const deleteAllMealsForDay = (day) => {
+    updateWeek(w => {
+      const oldMeals = w.mealPlan?.[day]?.meals || [];
+      const updatedCompleted = { ...(w.mealsCompleted || {}) };
+      oldMeals.forEach(m => { delete updatedCompleted[m.id]; });
+      const updatedMealPlan = JSON.parse(JSON.stringify(w.mealPlan));
+      updatedMealPlan[day] = { meals: [] };
+      return { ...w, mealPlan: updatedMealPlan, mealsCompleted: updatedCompleted };
+    });
+    setConfirmDeleteAllMeals(false);
+    showToast(`All ${day} meals deleted`);
+  };
+
+  // Reset ALL meals across ALL weeks
+  const resetAllMeals = () => {
+    setWeekArchive(prev => {
+      const updated = {};
+      for (const [key, data] of Object.entries(prev)) {
+        updated[key] = {
+          ...data,
+          mealPlan: JSON.parse(JSON.stringify(EMPTY_MEAL_PLAN)),
+          mealsCompleted: {},
+        };
+      }
+      return updated;
+    });
+    setConfirmResetAllMeals(false);
+    showToast('All meal plans deleted across all weeks');
+  };
+
   const addMeal = () => {
     if (!newMeal.name.trim()) return;
     updateWeek(w => {
       const u = JSON.parse(JSON.stringify(w.mealPlan));
       if (!u[selectedDay]) u[selectedDay] = { meals: [] };
       u[selectedDay].meals.push({ id: generateId(), ...newMeal });
-      u[selectedDay].meals.sort((a, b) => (a.time||'').localeCompare(b.time||''));
+      u[selectedDay].meals.sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time));
       return { ...w, mealPlan: u };
     });
     setNewMeal({ time: '', name: '', ingredients: '', calories: '', prep: '' });
@@ -687,7 +743,7 @@ function App() {
       if (u[day]) {
         const m = u[day].meals.find(m => m.id === mealId);
         if (m) Object.assign(m, editMealValues);
-        u[day].meals.sort((a, b) => (a.time||'').localeCompare(b.time||''));
+        u[day].meals.sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time));
       }
       return { ...w, mealPlan: u };
     });
@@ -1088,63 +1144,88 @@ function App() {
             ) : (
               <div style={s.card}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: '#fafafa', borderBottom: '1px solid #f0f0f0' }}>
-                  <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#059669' }}>Today's Meals</h3>
-                  <button onClick={() => setShowAddMealModal(true)} style={s.btnSm('transparent', '#666')}>+ Add</button>
+                  <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#059669' }}>{selectedDay}'s Meals</h3>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => setShowAddMealModal(true)} style={s.btnSm('transparent', '#059669')}>+ Add</button>
+                    {confirmDeleteAllMeals ? (
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button onClick={() => deleteAllMealsForDay(selectedDay)} style={s.btnSm('#ef4444')}>Delete All</button>
+                        <button onClick={() => setConfirmDeleteAllMeals(false)} style={s.btnSm('#eee', '#333')}>No</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setConfirmDeleteAllMeals(true)} style={s.btnSm('transparent', '#ef4444')}>Clear Day</button>
+                    )}
+                  </div>
                 </div>
-                {mealDayData.meals.map(meal => {
+                {[...mealDayData.meals].sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time)).map(meal => {
                   const mc = getMealTimeColor(meal.time);
                   return (
-                    <div key={meal.id} style={{ borderBottom: '1px solid #f5f5f5' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', gap: 10, opacity: mealsCompleted[meal.id] ? 0.5 : 1, transition: 'opacity 0.3s' }}>
-                        <div onClick={() => toggleMeal(meal.id)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', minWidth: 48 }}>
-                          <div style={{ width: 26, height: 26, borderRadius: 7, border: mealsCompleted[meal.id] ? 'none' : '2px solid #ddd', background: mealsCompleted[meal.id] ? '#10b981' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                            {mealsCompleted[meal.id] && <span style={{ color: '#fff', fontSize: 14 }}>✓</span>}
+                    <div key={meal.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                      {editingMealId === meal.id ? (
+                        <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <input value={editMealValues.time} onChange={e => setEditMealValues({ ...editMealValues, time: e.target.value })} placeholder="Time" style={{ width: 100, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 12 }} />
+                            <input autoFocus value={editMealValues.name} onChange={e => setEditMealValues({ ...editMealValues, name: e.target.value })} style={{ flex: 1, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13 }} />
                           </div>
-                          <span style={{ fontSize: 9, fontWeight: 600, marginTop: 2, color: mealsCompleted[meal.id] ? '#10b981' : '#ccc' }}>
-                            {mealsCompleted[meal.id] ? 'Followed' : 'Mark'}
-                          </span>
+                          <textarea value={editMealValues.ingredients} onChange={e => setEditMealValues({ ...editMealValues, ingredients: e.target.value })} placeholder="Ingredients" rows={2} style={{ padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 11, resize: 'vertical', fontFamily: 'inherit' }} />
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <input value={editMealValues.calories} onChange={e => setEditMealValues({ ...editMealValues, calories: e.target.value })} placeholder="Calories" style={{ width: 80, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 12 }} />
+                            <textarea value={editMealValues.prep} onChange={e => setEditMealValues({ ...editMealValues, prep: e.target.value })} placeholder="Prep" rows={1} style={{ flex: 1, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 11, resize: 'vertical', fontFamily: 'inherit' }} />
+                          </div>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <button onClick={() => saveMealEdit(selectedDay, meal.id)} style={s.btnSm('#10b981')}>Save</button>
+                            <button onClick={() => setEditingMealId(null)} style={s.btnSm('#eee', '#333')}>Cancel</button>
+                          </div>
                         </div>
-                        {editingMealId === meal.id ? (
-                          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              <input value={editMealValues.time} onChange={e => setEditMealValues({ ...editMealValues, time: e.target.value })} placeholder="Time" style={{ width: 100, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 12 }} />
-                              <input autoFocus value={editMealValues.name} onChange={e => setEditMealValues({ ...editMealValues, name: e.target.value })} style={{ flex: 1, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13 }} />
-                            </div>
-                            <textarea value={editMealValues.ingredients} onChange={e => setEditMealValues({ ...editMealValues, ingredients: e.target.value })} placeholder="Ingredients" rows={2} style={{ padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 11, resize: 'vertical', fontFamily: 'inherit' }} />
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              <input value={editMealValues.calories} onChange={e => setEditMealValues({ ...editMealValues, calories: e.target.value })} placeholder="Calories" style={{ width: 80, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 12 }} />
-                              <textarea value={editMealValues.prep} onChange={e => setEditMealValues({ ...editMealValues, prep: e.target.value })} placeholder="Prep" rows={1} style={{ flex: 1, padding: '4px 8px', border: '1px solid #ddd', borderRadius: 4, fontSize: 11, resize: 'vertical', fontFamily: 'inherit' }} />
-                            </div>
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              <button onClick={() => saveMealEdit(selectedDay, meal.id)} style={s.btnSm('#10b981')}>Save</button>
-                              <button onClick={() => setEditingMealId(null)} style={s.btnSm('#eee', '#333')}>Cancel</button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div style={{ flex: 1 }} onClick={() => startMealEdit(meal)}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <span style={{ fontSize: 11, fontWeight: 700, color: mc, background: `${mc}15`, padding: '2px 8px', borderRadius: 4 }}>{meal.time}</span>
-                              <span style={{ fontSize: 13, fontWeight: 500, textDecoration: mealsCompleted[meal.id] ? 'line-through' : 'none', color: '#333', cursor: 'pointer' }}>{meal.name}</span>
-                            </div>
-                            {meal.calories && <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>{meal.calories} cal</div>}
-                          </div>
-                        )}
-                        {editingMealId !== meal.id && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                            {(meal.ingredients || meal.prep) && <button onClick={e => { e.stopPropagation(); setExpandedMealId(expandedMealId === meal.id ? null : meal.id); }} style={{ background: expandedMealId === meal.id ? '#10b981' : 'none', border: expandedMealId === meal.id ? 'none' : '1px solid #ddd', color: expandedMealId === meal.id ? '#fff' : '#888', cursor: 'pointer', fontSize: 11, padding: '3px 7px', borderRadius: 5, fontWeight: 600 }}>i</button>}
-                            {confirmMealDelete === meal.id ? (
-                              <div style={{ display: 'flex', gap: 4 }}>
-                                <button onClick={() => removeMeal(selectedDay, meal.id)} style={s.btnSm('#ef4444')}>Yes</button>
-                                <button onClick={() => setConfirmMealDelete(null)} style={s.btnSm('#eee', '#333')}>No</button>
+                      ) : (
+                        <div style={{ padding: '12px 14px', opacity: mealsCompleted[meal.id] ? 0.55 : 1, transition: 'opacity 0.3s' }}>
+                          {/* Row 1: Checkbox + Time + Name + Actions */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <div onClick={() => toggleMeal(meal.id)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', minWidth: 44 }}>
+                              <div style={{ width: 26, height: 26, borderRadius: 7, border: mealsCompleted[meal.id] ? 'none' : '2px solid #ddd', background: mealsCompleted[meal.id] ? '#10b981' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                {mealsCompleted[meal.id] && <span style={{ color: '#fff', fontSize: 14 }}>✓</span>}
                               </div>
-                            ) : <button onClick={() => setConfirmMealDelete(meal.id)} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 16, padding: '0 4px' }}>{'\u00d7'}</button>}
+                              <span style={{ fontSize: 9, fontWeight: 600, marginTop: 2, color: mealsCompleted[meal.id] ? '#10b981' : '#ccc' }}>
+                                {mealsCompleted[meal.id] ? 'Followed' : 'Mark'}
+                              </span>
+                            </div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 11, fontWeight: 700, color: mc, background: `${mc}15`, padding: '2px 8px', borderRadius: 4 }}>{meal.time}</span>
+                                <span style={{ fontSize: 13, fontWeight: 600, textDecoration: mealsCompleted[meal.id] ? 'line-through' : 'none', color: '#333' }}>{meal.name}</span>
+                                {meal.calories && <span style={{ fontSize: 11, color: '#888', marginLeft: 'auto' }}>{meal.calories} cal</span>}
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <button onClick={() => startMealEdit(meal)} style={{ background: 'none', border: '1px solid #ddd', color: '#888', cursor: 'pointer', fontSize: 10, padding: '3px 7px', borderRadius: 5, fontWeight: 600 }}>Edit</button>
+                              {confirmMealDelete === meal.id ? (
+                                <div style={{ display: 'flex', gap: 4 }}>
+                                  <button onClick={() => removeMeal(selectedDay, meal.id)} style={s.btnSm('#ef4444')}>Yes</button>
+                                  <button onClick={() => setConfirmMealDelete(null)} style={s.btnSm('#eee', '#333')}>No</button>
+                                </div>
+                              ) : <button onClick={() => setConfirmMealDelete(meal.id)} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 16, padding: '0 4px' }}>{'\u00d7'}</button>}
+                            </div>
                           </div>
-                        )}
-                      </div>
-                      {expandedMealId === meal.id && (
-                        <div style={{ padding: '0 14px 12px 48px' }}>
-                          {meal.ingredients && <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '10px 12px', marginBottom: meal.prep ? 6 : 0 }}><div style={{ fontSize: 11, fontWeight: 700, color: '#059669', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Ingredients</div><div style={{ fontSize: 12, color: '#444', lineHeight: 1.5 }}>{meal.ingredients}</div></div>}
-                          {meal.prep && <div style={{ background: '#fffbeb', borderRadius: 8, padding: '10px 12px', borderLeft: '3px solid #f59e0b' }}><div style={{ fontSize: 11, fontWeight: 700, color: '#b45309', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>How to Prepare</div><div style={{ fontSize: 12, color: '#666', lineHeight: 1.5 }}>{meal.prep}</div></div>}
+                          {/* Row 2: Ingredients shown inline */}
+                          {meal.ingredients && (
+                            <div style={{ marginTop: 6, marginLeft: 54, fontSize: 12, color: '#666', lineHeight: 1.5, background: '#f8fdf8', padding: '6px 10px', borderRadius: 6, borderLeft: '3px solid #10b981' }}>
+                              {meal.ingredients}
+                            </div>
+                          )}
+                          {/* Row 3: Prep instructions (shown on tap via expand) */}
+                          {meal.prep && (
+                            <div style={{ marginTop: 4, marginLeft: 54 }}>
+                              <button onClick={e => { e.stopPropagation(); setExpandedMealId(expandedMealId === meal.id ? null : meal.id); }}
+                                style={{ background: 'none', border: 'none', color: '#b45309', cursor: 'pointer', fontSize: 11, fontWeight: 600, padding: 0 }}>
+                                {expandedMealId === meal.id ? 'Hide prep ▲' : 'Show prep ▼'}
+                              </button>
+                              {expandedMealId === meal.id && (
+                                <div style={{ marginTop: 4, background: '#fffbeb', borderRadius: 6, padding: '6px 10px', borderLeft: '3px solid #f59e0b', fontSize: 12, color: '#666', lineHeight: 1.5 }}>
+                                  {meal.prep}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1154,7 +1235,7 @@ function App() {
             )}
             {mealDayData?.meals?.length > 0 && (
               <div style={{ display: 'flex', gap: 8, padding: '8px 0 20px' }}>
-                <button onClick={() => updateWeek(w => ({ ...w, mealsCompleted: {} }))} style={{ ...s.btn('#fff', '#666'), border: '1px solid #ddd' }}>Reset Meals</button>
+                <button onClick={() => updateWeek(w => ({ ...w, mealsCompleted: {} }))} style={{ ...s.btn('#fff', '#666'), border: '1px solid #ddd' }}>Reset Follow Status</button>
                 <button onClick={() => setShowAddMealModal(true)} style={s.btn('#10b981')}>+ Add Meal</button>
               </div>
             )}
@@ -1512,6 +1593,25 @@ function App() {
                 </button>
               </div>
             )}
+
+            {/* Reset all meals */}
+            <div style={{ ...s.card, padding: 16, borderLeft: '4px solid #ef4444' }}>
+              <h3 style={{ margin: '0 0 6px', fontSize: 15, color: '#ef4444' }}>Reset Meal Plans</h3>
+              <p style={{ margin: '0 0 12px', fontSize: 13, color: '#888' }}>Delete all meal plans across all weeks. Workout plans will not be affected.</p>
+              {confirmResetAllMeals ? (
+                <div>
+                  <p style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 600, color: '#ef4444' }}>Are you sure? This will permanently delete all meal data for every week.</p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={resetAllMeals} style={{ ...s.btn('#ef4444'), flex: 1 }}>Yes, Delete All Meals</button>
+                    <button onClick={() => setConfirmResetAllMeals(false)} style={{ ...s.btn('#eee', '#333'), flex: 1 }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmResetAllMeals(true)} style={{ ...s.btn('#fff', '#ef4444'), border: '1px solid #ef4444' }}>
+                  Reset All Meal Plans
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
