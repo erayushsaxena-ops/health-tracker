@@ -300,6 +300,7 @@ const parseCSVLine = (line) => {
 
 const normMealH = (h) => {
   const k = (h||'').toString().trim().toLowerCase().replace(/[^a-z]/g,'');
+  if (['date'].includes(k)) return 'date';
   if (['day','dayname','weekday'].includes(k)) return 'day';
   if (['time','mealtime','slot','timeslot'].includes(k)) return 'time';
   if (['mealname','name','meal','dish','food','item'].includes(k)) return 'name';
@@ -309,12 +310,67 @@ const normMealH = (h) => {
   return k;
 };
 
+// Get the week key (Tuesday start) for a given date
+const getWeekKeyForDate = (dateStr) => {
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d.getTime())) return null;
+  const dayOfWeek = d.getDay(); // 0=Sun
+  const diffToTue = (dayOfWeek < 2 ? dayOfWeek + 5 : dayOfWeek - 2);
+  const tue = new Date(d);
+  tue.setDate(d.getDate() - diffToTue);
+  const key = `${tue.getFullYear()}-${String(tue.getMonth()+1).padStart(2,'0')}-${String(tue.getDate()).padStart(2,'0')}`;
+  return key;
+};
+
+// Get day name from a date string
+const getDayNameFromDate = (dateStr) => {
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString('en-US', { weekday: 'long' });
+};
+
 const parseMealCSV = (text) => {
   const lines = text.split('\n').filter(l => l.trim());
-  if (lines.length < 2) return { mealPlan: {}, errors: ['Empty file'], rowCount: 0 };
+  if (lines.length < 2) return { weeklyMealPlans: {}, mealPlan: {}, errors: ['Empty file'], rowCount: 0, hasDateColumn: false };
   const headers = parseCSVLine(lines[0]).map(normMealH);
-  const mealPlan = {}; const errors = []; let rowCount = 0;
+  const hasDateColumn = headers.includes('date');
+  const errors = []; let rowCount = 0;
   const validDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+
+  // If CSV has a Date column, group by week
+  if (hasDateColumn) {
+    const weeklyMealPlans = {}; // { weekKey: { day: { meals: [] } } }
+    for (let i = 1; i < lines.length; i++) {
+      const vals = parseCSVLine(lines[i]);
+      if (vals.every(v => !v.trim())) continue;
+      const row = {}; headers.forEach((h, idx) => { row[h] = (vals[idx]||'').trim(); });
+      const dateRaw = row.date || '';
+      if (!dateRaw) { errors.push(`Row ${i}: Missing date`); continue; }
+      const weekKey = getWeekKeyForDate(dateRaw);
+      if (!weekKey) { errors.push(`Row ${i}: Invalid date "${dateRaw}"`); continue; }
+      const dayName = row.day || getDayNameFromDate(dateRaw);
+      if (!dayName) { errors.push(`Row ${i}: Cannot determine day for "${dateRaw}"`); continue; }
+      const name = row.name || row.meal || '';
+      if (!name) { errors.push(`Row ${i}: Missing meal name`); continue; }
+      if (!weeklyMealPlans[weekKey]) weeklyMealPlans[weekKey] = {};
+      if (!weeklyMealPlans[weekKey][dayName]) weeklyMealPlans[weekKey][dayName] = { meals: [] };
+      weeklyMealPlans[weekKey][dayName].meals.push({
+        id: generateId(), time: row.time||'', name, ingredients: row.ingredients||'', calories: row.calories||'', prep: row.prep||''
+      });
+      rowCount++;
+    }
+    // Sort meals by time within each day
+    for (const wk of Object.values(weeklyMealPlans)) {
+      for (const day of Object.values(wk)) {
+        day.meals.sort((a, b) => (a.time||'').localeCompare(b.time||''));
+      }
+    }
+    const weekCount = Object.keys(weeklyMealPlans).length;
+    return { weeklyMealPlans, mealPlan: {}, errors, rowCount, hasDateColumn: true, weekCount };
+  }
+
+  // Fallback: no date column, use day names only (original behavior)
+  const mealPlan = {};
   for (let i = 1; i < lines.length; i++) {
     const vals = parseCSVLine(lines[i]);
     if (vals.every(v => !v.trim())) continue;
@@ -330,7 +386,7 @@ const parseMealCSV = (text) => {
     mealPlan[dayName].meals.push({ id: generateId(), time: row.time||'', name, ingredients: row.ingredients||'', calories: row.calories||'', prep: row.prep||'' });
     rowCount++;
   }
-  return { mealPlan, errors, rowCount };
+  return { weeklyMealPlans: {}, mealPlan, errors, rowCount, hasDateColumn: false };
 };
 
 // ─── STYLES ───────────────────────────────────────────
@@ -587,6 +643,17 @@ function App() {
   // ─── MEAL CRUD ─────────────────────────────────────
   const toggleMeal = (id) => updateWeek(w => ({ ...w, mealsCompleted: { ...w.mealsCompleted, [id]: !w.mealsCompleted[id] } }));
 
+  // Mark all meals for a day as followed or not
+  const markAllMealsForDay = (day, followed) => {
+    updateWeek(w => {
+      const meals = w.mealPlan?.[day]?.meals || [];
+      const updated = { ...w.mealsCompleted };
+      meals.forEach(m => { updated[m.id] = followed; });
+      return { ...w, mealsCompleted: updated };
+    });
+    showToast(followed ? `All ${day} meals marked as followed` : `All ${day} meals unmarked`);
+  };
+
   const addMeal = () => {
     if (!newMeal.name.trim()) return;
     updateWeek(w => {
@@ -647,16 +714,59 @@ function App() {
   };
 
   const applyUploadedMealPlan = () => {
-    if (!uploadResult?.mealPlan) return;
-    const merged = JSON.parse(JSON.stringify(EMPTY_MEAL_PLAN));
-    for (const [day, data] of Object.entries(uploadResult.mealPlan)) merged[day] = data;
-    updateWeek(w => ({ ...w, mealPlan: merged, mealsCompleted: {} }));
+    if (!uploadResult) return;
+
+    // Multi-week date-based upload
+    if (uploadResult.hasDateColumn && uploadResult.weeklyMealPlans) {
+      setWeekArchive(prev => {
+        const updated = { ...prev };
+        for (const [weekKey, dayMeals] of Object.entries(uploadResult.weeklyMealPlans)) {
+          const existing = updated[weekKey] || {
+            gymPlan: JSON.parse(JSON.stringify(DEFAULT_PLAN)),
+            mealPlan: JSON.parse(JSON.stringify(EMPTY_MEAL_PLAN)),
+            exercisesCompleted: {},
+            mealsCompleted: {},
+          };
+          // Start from existing meal plan, then REPLACE days that appear in the upload
+          const mergedMealPlan = JSON.parse(JSON.stringify(existing.mealPlan || EMPTY_MEAL_PLAN));
+          for (const [day, data] of Object.entries(dayMeals)) {
+            mergedMealPlan[day] = data; // Replace entire day's meals
+          }
+          // Clear mealsCompleted only for days that were replaced
+          const updatedMealsCompleted = { ...(existing.mealsCompleted || {}) };
+          for (const [day, data] of Object.entries(dayMeals)) {
+            const oldMeals = existing.mealPlan?.[day]?.meals || [];
+            oldMeals.forEach(m => { delete updatedMealsCompleted[m.id]; });
+          }
+          updated[weekKey] = { ...existing, mealPlan: mergedMealPlan, mealsCompleted: updatedMealsCompleted };
+        }
+        return updated;
+      });
+      setUploadStatus('success');
+      const weekCount = Object.keys(uploadResult.weeklyMealPlans).length;
+      showToast(`${uploadResult.rowCount} meals loaded across ${weekCount} weeks!`);
+      return;
+    }
+
+    // Single-week day-based upload — replace days that appear in the CSV
+    if (!uploadResult.mealPlan) return;
+    updateWeek(w => {
+      const mergedMealPlan = JSON.parse(JSON.stringify(w.mealPlan || EMPTY_MEAL_PLAN));
+      const updatedMealsCompleted = { ...(w.mealsCompleted || {}) };
+      for (const [day, data] of Object.entries(uploadResult.mealPlan)) {
+        // Clear old completion status for replaced days
+        const oldMeals = mergedMealPlan[day]?.meals || [];
+        oldMeals.forEach(m => { delete updatedMealsCompleted[m.id]; });
+        mergedMealPlan[day] = data; // Replace entire day
+      }
+      return { ...w, mealPlan: mergedMealPlan, mealsCompleted: updatedMealsCompleted };
+    });
     setUploadStatus('success');
     showToast(`${uploadResult.rowCount} meals loaded for this week!`);
   };
 
   const downloadMealTemplate = () => {
-    const csv = 'Day,Time,Meal Name,Ingredients,Calories,Prep Instructions\nTuesday,7:00 AM,Oats with Banana,"Oats (50g), banana, almonds",380,"Cook oats in milk"\nTuesday,1:00 PM,Paneer Wrap,"Roti (2), paneer (150g), veggies",520,"Grill paneer, wrap in roti"';
+    const csv = 'Date,Day,Time,Meal Name,Ingredients,Calories,Prep Instructions\n2026-03-28,Friday,8:00 AM,Breakfast,"Moong dal chilla (2) + green chutney",320,"Make batter, cook on tawa"\n2026-03-28,Friday,1:00 PM,Lunch,"2 methi paratha + moong dal tadka + salad",520,"Dry roast paratha, cook dal"\n2026-03-28,Friday,8:00 PM,Dinner,"White rice + lauki sabji + curd + salad",450,"Cook lauki with 1 tsp oil"';
     const b = new Blob([csv], { type: 'text/csv' }); const u = URL.createObjectURL(b);
     const a = document.createElement('a'); a.href = u; a.download = 'meal_plan_template.csv'; a.click(); URL.revokeObjectURL(u);
     showToast('Template downloaded!');
@@ -949,9 +1059,20 @@ function App() {
           <>
             <div style={{ background: 'linear-gradient(135deg, #059669, #10b981)', color: '#fff', borderRadius: 12, padding: '14px 16px', marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div><h2 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{selectedDay} Meals</h2><p style={{ margin: '2px 0 0', fontSize: 13, opacity: 0.85 }}>{mealDayData?.meals?.length || 0} meals</p></div>
-                <div style={{ textAlign: 'right' }}><div style={{ fontSize: 26, fontWeight: 700 }}>{mealProgress.pct}%</div><div style={{ fontSize: 11, opacity: 0.8 }}>{mealProgress.done}/{mealProgress.total}</div></div>
+                <div><h2 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{selectedDay} Meals</h2><p style={{ margin: '2px 0 0', fontSize: 13, opacity: 0.85 }}>{mealDayData?.meals?.length || 0} meals — {mealProgress.done} followed</p></div>
+                <div style={{ textAlign: 'right' }}><div style={{ fontSize: 26, fontWeight: 700 }}>{mealProgress.pct}%</div><div style={{ fontSize: 11, opacity: 0.8 }}>{mealProgress.done}/{mealProgress.total} followed</div></div>
               </div>
+              {/* Quick mark all buttons */}
+              {mealDayData?.meals?.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button onClick={() => markAllMealsForDay(selectedDay, true)} style={{ flex: 1, padding: '7px 10px', background: 'rgba(255,255,255,0.2)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                    ✓ Mark All Followed
+                  </button>
+                  <button onClick={() => markAllMealsForDay(selectedDay, false)} style={{ flex: 1, padding: '7px 10px', background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: 500, cursor: 'pointer' }}>
+                    Reset Day
+                  </button>
+                </div>
+              )}
             </div>
 
             {(!mealDayData?.meals?.length) ? (
@@ -975,8 +1096,13 @@ function App() {
                   return (
                     <div key={meal.id} style={{ borderBottom: '1px solid #f5f5f5' }}>
                       <div style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', gap: 10, opacity: mealsCompleted[meal.id] ? 0.5 : 1, transition: 'opacity 0.3s' }}>
-                        <div onClick={() => toggleMeal(meal.id)} style={{ width: 24, height: 24, minWidth: 24, borderRadius: 6, border: mealsCompleted[meal.id] ? 'none' : '2px solid #ddd', background: mealsCompleted[meal.id] ? '#10b981' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
-                          {mealsCompleted[meal.id] && <span style={{ color: '#fff', fontSize: 14 }}>✓</span>}
+                        <div onClick={() => toggleMeal(meal.id)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', minWidth: 48 }}>
+                          <div style={{ width: 26, height: 26, borderRadius: 7, border: mealsCompleted[meal.id] ? 'none' : '2px solid #ddd', background: mealsCompleted[meal.id] ? '#10b981' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            {mealsCompleted[meal.id] && <span style={{ color: '#fff', fontSize: 14 }}>✓</span>}
+                          </div>
+                          <span style={{ fontSize: 9, fontWeight: 600, marginTop: 2, color: mealsCompleted[meal.id] ? '#10b981' : '#ccc' }}>
+                            {mealsCompleted[meal.id] ? 'Followed' : 'Mark'}
+                          </span>
                         </div>
                         {editingMealId === meal.id ? (
                           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1227,10 +1353,15 @@ function App() {
               {DAYS.map(day => {
                 const p = getDayProgress(day); const mp = getMealDayProgress(day);
                 const isToday = getToday() === day && weekInfo.isCurrentWeek;
+                const mealStatus = mp.total === 0 ? 'No meals' : mp.pct === 100 ? 'All followed' : mp.done > 0 ? `${mp.done}/${mp.total} followed` : 'Not followed';
+                const mealStatusColor = mp.total === 0 ? '#ccc' : mp.pct === 100 ? '#10b981' : mp.done > 0 ? '#f59e0b' : '#ef4444';
                 return (<div key={day} style={{ marginBottom: 10 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
                     <span style={{ fontWeight: isToday ? 700 : 400, color: isToday ? '#e94560' : '#333' }}>{day}{isToday && ' (Today)'}</span>
-                    <span style={{ color: '#888', fontSize: 11 }}>Gym {p.done}/{p.total} | Meals {mp.done}/{mp.total}</span>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span style={{ color: '#888', fontSize: 11 }}>Gym {p.done}/{p.total}</span>
+                      <span style={{ fontSize: 10, fontWeight: 600, color: mealStatusColor, background: `${mealStatusColor}15`, padding: '1px 6px', borderRadius: 4 }}>{mealStatus}</span>
+                    </div>
                   </div>
                   <div style={{ display: 'flex', gap: 4 }}>
                     <div style={{ flex: 1, background: '#f0f0f0', borderRadius: 4, height: 6, overflow: 'hidden' }}>
@@ -1242,24 +1373,40 @@ function App() {
                   </div>
                 </div>);
               })}
+              <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#888', marginTop: 8, justifyContent: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><div style={{ width: 12, height: 6, background: '#e94560', borderRadius: 3 }} /> Workout</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}><div style={{ width: 12, height: 6, background: '#10b981', borderRadius: 3 }} /> Meals Followed</div>
+              </div>
             </div>
 
             {/* Summary */}
             <div style={{ ...s.card, padding: 16 }}>
               <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>Summary</h3>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                {[
-                  { val: week.done, label: 'Exercises Done', bg: '#f8f9ff', color: '#1a1a2e' },
-                  { val: week.total - week.done, label: 'Remaining', bg: '#fff5f7', color: '#e94560' },
-                  { val: DAYS.filter(d => getDayProgress(d).pct === 100).length, label: 'Workout Days Done', bg: '#f0fdf4', color: '#16a34a' },
-                  { val: `${week.pct}%`, label: 'Week Completion', bg: '#fefce8', color: '#ca8a04' },
-                ].map(item => (
-                  <div key={item.label} style={{ background: item.bg, borderRadius: 10, padding: 14, textAlign: 'center' }}>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: item.color }}>{item.val}</div>
-                    <div style={{ fontSize: 11, color: '#888' }}>{item.label}</div>
-                  </div>
-                ))}
-              </div>
+              {(() => {
+                const totalMeals = DAYS.reduce((s, d) => s + (mealPlan?.[d]?.meals?.length || 0), 0);
+                const followedMeals = DAYS.reduce((s, d) => s + (mealPlan?.[d]?.meals?.filter(m => mealsCompleted[m.id]).length || 0), 0);
+                const mealFollowPct = totalMeals === 0 ? 0 : Math.round((followedMeals / totalMeals) * 100);
+                const daysFullyFollowed = DAYS.filter(d => { const mp = getMealDayProgress(d); return mp.total > 0 && mp.pct === 100; }).length;
+                return (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  {[
+                    { val: week.done, label: 'Exercises Done', bg: '#f8f9ff', color: '#1a1a2e' },
+                    { val: week.total - week.done, label: 'Remaining', bg: '#fff5f7', color: '#e94560' },
+                    { val: DAYS.filter(d => getDayProgress(d).pct === 100).length, label: 'Workout Days Done', bg: '#f0fdf4', color: '#16a34a' },
+                    { val: `${week.pct}%`, label: 'Week Completion', bg: '#fefce8', color: '#ca8a04' },
+                    { val: `${followedMeals}/${totalMeals}`, label: 'Meals Followed', bg: '#f0fdf4', color: '#059669' },
+                    { val: `${mealFollowPct}%`, label: 'Meal Compliance', bg: totalMeals === 0 ? '#f5f5f5' : mealFollowPct >= 80 ? '#f0fdf4' : mealFollowPct >= 50 ? '#fefce8' : '#fff5f7', color: totalMeals === 0 ? '#999' : mealFollowPct >= 80 ? '#16a34a' : mealFollowPct >= 50 ? '#ca8a04' : '#ef4444' },
+                    { val: daysFullyFollowed, label: 'Days Fully Followed', bg: '#f0fdf4', color: '#10b981' },
+                    { val: `${currentScore?.overall || 0}%`, label: 'Overall Score', bg: grade ? `${grade.color}10` : '#f5f5f5', color: grade?.color || '#888' },
+                  ].map(item => (
+                    <div key={item.label} style={{ background: item.bg, borderRadius: 10, padding: 14, textAlign: 'center' }}>
+                      <div style={{ fontSize: 28, fontWeight: 700, color: item.color }}>{item.val}</div>
+                      <div style={{ fontSize: 11, color: '#888' }}>{item.label}</div>
+                    </div>
+                  ))}
+                </div>
+                );
+              })()}
             </div>
           </div>
           );
@@ -1296,16 +1443,41 @@ function App() {
 
             {uploadStatus === 'preview' && uploadResult && (
               <div style={{ ...s.card, padding: 16 }}>
-                <h3 style={{ margin: '0 0 8px', fontSize: 15, color: '#16a34a' }}>Preview: {uploadResult.rowCount} meals</h3>
+                <h3 style={{ margin: '0 0 8px', fontSize: 15, color: '#16a34a' }}>
+                  Preview: {uploadResult.rowCount} meals
+                  {uploadResult.hasDateColumn && uploadResult.weekCount && <span style={{ fontSize: 12, fontWeight: 400, color: '#888' }}> across {uploadResult.weekCount} weeks</span>}
+                </h3>
                 {uploadErrors.length > 0 && <div style={{ background: '#fff5f5', borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: '#dc2626' }}><strong>Warnings:</strong>{uploadErrors.map((e, i) => <div key={i}>- {e}</div>)}</div>}
-                {Object.entries(uploadResult.mealPlan).map(([day, data]) => (
+
+                {/* Multi-week date-based preview */}
+                {uploadResult.hasDateColumn && uploadResult.weeklyMealPlans && Object.entries(uploadResult.weeklyMealPlans).sort(([a],[b]) => a.localeCompare(b)).map(([weekKey, dayMeals]) => {
+                  const wkInfo = (() => { const d = new Date(weekKey + 'T00:00:00'); const mon = new Date(d); mon.setDate(d.getDate() + 6); const fmt = (dt) => dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); return `${fmt(d)} - ${fmt(mon)}`; })();
+                  const mealCount = Object.values(dayMeals).reduce((s, d) => s + d.meals.length, 0);
+                  return (
+                    <div key={weekKey} style={{ marginBottom: 12, padding: 10, background: '#f8fdf8', borderRadius: 10, border: '1px solid #d1fae5' }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: '#059669', marginBottom: 6 }}>{wkInfo} ({mealCount} meals)</div>
+                      {Object.entries(dayMeals).map(([day, data]) => (
+                        <div key={day} style={{ marginBottom: 6 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: DAY_COLORS[day]||'#333', marginBottom: 2 }}>{day}</div>
+                          {data.meals.map((m, i) => <div key={i} style={{ marginLeft: 12, fontSize: 11, color: '#666' }}><span style={{ fontWeight: 600 }}>{m.time}</span> - {m.name}</div>)}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+
+                {/* Single-week day-based preview */}
+                {!uploadResult.hasDateColumn && Object.entries(uploadResult.mealPlan).map(([day, data]) => (
                   <div key={day} style={{ marginBottom: 10 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: DAY_COLORS[day]||'#333', marginBottom: 2 }}>{day}</div>
                     {data.meals.map((m, i) => <div key={i} style={{ marginLeft: 12, fontSize: 12, color: '#666' }}><span style={{ fontWeight: 600 }}>{m.time}</span> - {m.name} {m.calories && `(${m.calories} cal)`}</div>)}
                   </div>
                 ))}
+
                 <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-                  <button onClick={applyUploadedMealPlan} style={{ ...s.btn('#10b981'), flex: 1 }}>Publish to {weekInfo.label}</button>
+                  <button onClick={applyUploadedMealPlan} style={{ ...s.btn('#10b981'), flex: 1 }}>
+                    {uploadResult.hasDateColumn ? `Publish ${uploadResult.weekCount} Weeks` : `Publish to ${weekInfo.label}`}
+                  </button>
                   <button onClick={() => { setUploadStatus(null); setUploadResult(null); }} style={{ ...s.btn('#eee', '#333'), flex: 1 }}>Cancel</button>
                 </div>
               </div>
@@ -1322,7 +1494,7 @@ function App() {
             {uploadStatus === 'success' && (
               <div style={{ ...s.card, padding: 16, borderLeft: '4px solid #16a34a' }}>
                 <h3 style={{ margin: '0 0 6px', fontSize: 15, color: '#16a34a' }}>Meal Plan Published!</h3>
-                <p style={{ margin: 0, fontSize: 13, color: '#666' }}>{uploadResult?.rowCount} meals loaded for {weekInfo.label}.</p>
+                <p style={{ margin: 0, fontSize: 13, color: '#666' }}>{uploadResult?.rowCount} meals loaded{uploadResult?.hasDateColumn ? ` across ${uploadResult?.weekCount} weeks` : ` for ${weekInfo.label}`}.</p>
                 <button onClick={() => setView('meals')} style={{ ...s.btn('#16a34a'), marginTop: 12 }}>Go to Meals</button>
               </div>
             )}
