@@ -259,7 +259,7 @@ const getWeekInfo = (offset = 0) => {
 
   const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const key = `${tue.getFullYear()}-${String(tue.getMonth()+1).padStart(2,'0')}-${String(tue.getDate()).padStart(2,'0')}`;
-  const label = `${fmt(tue)} - ${fmt(mon)}`;
+  const label = `Tue ${fmt(tue)} - Mon ${fmt(mon)}`;
   const isCurrentWeek = offset === 0;
 
   return { key, label, isCurrentWeek, startDate: tue };
@@ -756,6 +756,12 @@ function App() {
     return { done, total, pct: Math.round((done / total) * 100) };
   }, [mealPlan, mealsCompleted]);
 
+  const getWeekMealProgress = useCallback(() => {
+    let total = 0, done = 0;
+    DAYS.forEach(day => { const p = getMealDayProgress(day); total += p.total; done += p.done; });
+    return { done, total, pct: total === 0 ? 0 : Math.round((done / total) * 100) };
+  }, [getMealDayProgress]);
+
   // ─── EXERCISE CRUD ─────────────────────────────────
   const addExercise = () => {
     if (!newExercise.name.trim()) return;
@@ -1019,6 +1025,7 @@ function App() {
 
   // ─── RENDER ─────────────────────────────────────────
   const week = plan ? getWeekProgress() : { done: 0, total: 0, pct: 0 };
+  const weekMeal = mealPlan ? getWeekMealProgress() : { done: 0, total: 0, pct: 0 };
   const dayData = plan?.[selectedDay];
   const dayProgress = getDayProgress(selectedDay);
   const dayColor = DAY_COLORS[selectedDay] || '#1a1a2e';
@@ -1109,7 +1116,7 @@ function App() {
             <div style={{ display: 'flex', gap: 8 }}>
               <div style={{ flex: 1, background: 'rgba(255,255,255,0.1)', borderRadius: 10, padding: '8px 12px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4 }}>
-                  <span>Workout</span><span style={{ fontWeight: 600 }}>{week.done}/{week.total}</span>
+                  <span>Workout (Tue-Mon)</span><span style={{ fontWeight: 600 }}>{week.done}/{week.total}</span>
                 </div>
                 <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: 6, height: 6, overflow: 'hidden' }}>
                   <div style={{ background: '#e94560', height: '100%', width: `${week.pct}%`, borderRadius: 6, transition: 'width 0.5s' }} />
@@ -1117,10 +1124,10 @@ function App() {
               </div>
               <div style={{ flex: 1, background: 'rgba(255,255,255,0.1)', borderRadius: 10, padding: '8px 12px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4 }}>
-                  <span>Meals</span><span style={{ fontWeight: 600 }}>{mealProgress.done}/{mealProgress.total}</span>
+                  <span>Meals (Tue-Mon)</span><span style={{ fontWeight: 600 }}>{weekMeal.done}/{weekMeal.total}</span>
                 </div>
                 <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: 6, height: 6, overflow: 'hidden' }}>
-                  <div style={{ background: '#4ade80', height: '100%', width: `${mealProgress.pct}%`, borderRadius: 6, transition: 'width 0.5s' }} />
+                  <div style={{ background: '#4ade80', height: '100%', width: `${weekMeal.pct}%`, borderRadius: 6, transition: 'width 0.5s' }} />
                 </div>
               </div>
             </div>
@@ -1157,7 +1164,7 @@ function App() {
         {/* CONTINUOUS DAY SCROLL */}
         {['tracker', 'meals', 'stats'].includes(view) && (
           <div ref={dayScrollRef} className="day-scroll" style={{ display: 'flex', gap: 4, padding: '12px 0', overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
-            {DATE_RANGE.map(entry => {
+            {DATE_RANGE.map((entry, idx) => {
               const sel = entry.dateKey === selectedDateKey;
               // Get progress from the correct week's data
               const wKey = getWeekInfo(entry.weekOffset).key;
@@ -1175,15 +1182,20 @@ function App() {
                   p = { done, total, pct: total === 0 ? 0 : Math.round((done / total) * 100) };
                 }
               }
+              const isTuesday = entry.dayName === 'Tuesday';
+              const showSeparator = isTuesday && idx > 0;
               return (
-                <button key={entry.dateKey} data-selected={sel ? 'true' : 'false'} onClick={() => selectDate(entry)}
-                  style={{ flex: '0 0 auto', padding: '6px 10px', minWidth: 56, border: sel ? '2px solid #e94560' : entry.isToday ? '2px solid #4ade80' : '2px solid transparent', borderRadius: 10, background: sel ? '#fff' : 'rgba(255,255,255,0.6)', cursor: 'pointer', textAlign: 'center', position: 'relative', boxShadow: sel ? '0 2px 8px rgba(233,69,96,0.2)' : 'none' }}>
-                  <div style={{ fontSize: 10, fontWeight: 600, color: sel ? '#e94560' : '#666' }}>{entry.dayName.slice(0, 3)}</div>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: sel ? '#e94560' : '#333', marginTop: 1 }}>{entry.dateLabel.split(' ')[1]}</div>
-                  <div style={{ fontSize: 9, color: '#999' }}>{entry.dateLabel.split(' ')[0]}</div>
-                  {p.total > 0 && <div style={{ fontSize: 9, color: p.pct === 100 ? '#10b981' : '#999', marginTop: 1, fontWeight: 600 }}>{p.pct === 100 ? '✓' : `${p.pct}%`}</div>}
-                  {entry.isToday && <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', position: 'absolute', top: 3, right: 3 }} />}
-                </button>
+                <React.Fragment key={entry.dateKey}>
+                  {showSeparator && <div style={{ width: 2, minWidth: 2, background: '#ddd', borderRadius: 1, margin: '4px 2px' }} />}
+                  <button data-selected={sel ? 'true' : 'false'} onClick={() => selectDate(entry)}
+                    style={{ flex: '0 0 auto', padding: '6px 10px', minWidth: 56, border: sel ? '2px solid #e94560' : entry.isToday ? '2px solid #4ade80' : '2px solid transparent', borderRadius: 10, background: sel ? '#fff' : isTuesday ? 'rgba(233,69,96,0.08)' : 'rgba(255,255,255,0.6)', cursor: 'pointer', textAlign: 'center', position: 'relative', boxShadow: sel ? '0 2px 8px rgba(233,69,96,0.2)' : 'none' }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: sel ? '#e94560' : '#666' }}>{entry.dayName.slice(0, 3)}</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: sel ? '#e94560' : '#333', marginTop: 1 }}>{entry.dateLabel.split(' ')[1]}</div>
+                    <div style={{ fontSize: 9, color: '#999' }}>{entry.dateLabel.split(' ')[0]}</div>
+                    {p.total > 0 && <div style={{ fontSize: 9, color: p.pct === 100 ? '#10b981' : '#999', marginTop: 1, fontWeight: 600 }}>{p.pct === 100 ? '✓' : `${p.pct}%`}</div>}
+                    {entry.isToday && <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', position: 'absolute', top: 3, right: 3 }} />}
+                  </button>
+                </React.Fragment>
               );
             })}
           </div>
