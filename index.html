@@ -19,14 +19,41 @@
     body {
       margin: 0;
     }
+    /* Hide scrollbar for day scroll */
+    .day-scroll::-webkit-scrollbar { display: none; }
+    /* Loading screen shown instantly while JS loads */
+    #loading-screen {
+      min-height: 100vh;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      color: #fff;
+    }
+    #loading-screen .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid rgba(255,255,255,0.2);
+      border-top-color: #e94560;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-bottom: 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <div id="loading-screen">
+      <div class="spinner"></div>
+      <div style="font-size:20px;font-weight:700;margin-bottom:6px">Health Tracker</div>
+      <div style="font-size:13px;opacity:0.6">Loading...</div>
+    </div>
+  </div>
 
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.0/babel.min.js"></script>
 
   <!-- Firebase SDK -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
@@ -46,6 +73,7 @@
     };
     firebase.initializeApp(firebaseConfig);
     window.fbAuth = firebase.auth();
+    window.fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
     window.fbDb = firebase.database();
     window.fbGoogleProvider = new firebase.auth.GoogleAuthProvider();
   </script>
@@ -239,6 +267,44 @@ const getWeekInfo = (offset = 0) => {
 
 const generateId = () => `${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 9)}`;
 const getToday = () => new Date().toLocaleDateString('en-US', { weekday: 'long' });
+
+// Generate continuous date range for day selector
+// Returns array of { date: Date, dayName: string, dateLabel: string, weekOffset: number, isToday: boolean }
+const generateDateRange = (daysBefore = 7, daysAfter = 21) => {
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const today = now.getTime();
+  const result = [];
+  for (let i = -daysBefore; i <= daysAfter; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + i);
+    const dayName = d.toLocaleDateString('en-US', { weekday: 'long' });
+    const dateLabel = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    // Calculate which weekOffset this date belongs to
+    const dayOfWeek = d.getDay(); // 0=Sun
+    const diffToTue = (dayOfWeek < 2 ? dayOfWeek + 5 : dayOfWeek - 2);
+    const tue = new Date(d);
+    tue.setDate(d.getDate() - diffToTue);
+    tue.setHours(0, 0, 0, 0);
+    // Current week's Tuesday
+    const nowDow = now.getDay();
+    const nowDiffToTue = (nowDow < 2 ? nowDow + 5 : nowDow - 2);
+    const currentTue = new Date(now);
+    currentTue.setDate(now.getDate() - nowDiffToTue);
+    currentTue.setHours(0, 0, 0, 0);
+    const weekOffset = Math.round((tue.getTime() - currentTue.getTime()) / (7 * 86400000));
+    result.push({
+      date: d,
+      dayName,
+      dateLabel,
+      weekOffset,
+      isToday: d.getTime() === today,
+      dateKey: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`,
+    });
+  }
+  return result;
+};
+const DATE_RANGE = generateDateRange();
 
 // Deep clone plan with new IDs to avoid shared state
 const clonePlanWithNewIds = (plan) => {
@@ -531,6 +597,11 @@ function App() {
     const today = getToday();
     return DAYS.includes(today) ? today : 'Tuesday';
   });
+  const [selectedDateKey, setSelectedDateKey] = useState(() => {
+    const todayEntry = DATE_RANGE.find(d => d.isToday);
+    return todayEntry ? todayEntry.dateKey : DATE_RANGE[7]?.dateKey || '';
+  });
+  const dayScrollRef = useRef(null);
   const [view, setView] = useState('tracker');
   const [toast, setToast] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -580,9 +651,31 @@ function App() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 2500); };
 
   // ─── WEEK NAVIGATION ──────────────────────────────
-  const goToPrevWeek = () => setWeekOffset(o => o - 1);
-  const goToNextWeek = () => setWeekOffset(o => o + 1);
-  const goToCurrentWeek = () => setWeekOffset(0);
+  const goToPrevWeek = () => {
+    const current = DATE_RANGE.find(d => d.dateKey === selectedDateKey);
+    if (current) {
+      const newDate = new Date(current.date);
+      newDate.setDate(newDate.getDate() - 7);
+      const newKey = `${newDate.getFullYear()}-${String(newDate.getMonth()+1).padStart(2,'0')}-${String(newDate.getDate()).padStart(2,'0')}`;
+      const found = DATE_RANGE.find(d => d.dateKey === newKey);
+      if (found) { selectDate(found); } else { setWeekOffset(o => o - 1); }
+    } else { setWeekOffset(o => o - 1); }
+  };
+  const goToNextWeek = () => {
+    const current = DATE_RANGE.find(d => d.dateKey === selectedDateKey);
+    if (current) {
+      const newDate = new Date(current.date);
+      newDate.setDate(newDate.getDate() + 7);
+      const newKey = `${newDate.getFullYear()}-${String(newDate.getMonth()+1).padStart(2,'0')}-${String(newDate.getDate()).padStart(2,'0')}`;
+      const found = DATE_RANGE.find(d => d.dateKey === newKey);
+      if (found) { selectDate(found); } else { setWeekOffset(o => o + 1); }
+    } else { setWeekOffset(o => o + 1); }
+  };
+  const goToCurrentWeek = () => {
+    const todayEntry = DATE_RANGE.find(d => d.isToday);
+    if (todayEntry) { selectDate(todayEntry); }
+    else { setWeekOffset(0); }
+  };
 
   // ─── COPY LAST WEEK ───────────────────────────────
   const copyLastWeek = () => {
@@ -614,8 +707,34 @@ function App() {
     showToast('Week initialized with default plan');
   };
 
+  // Select a date from the continuous scroll
+  const selectDate = (dateEntry) => {
+    setSelectedDay(dateEntry.dayName);
+    setSelectedDateKey(dateEntry.dateKey);
+    setWeekOffset(dateEntry.weekOffset);
+  };
+
+  // Auto-scroll to selected date
+  useEffect(() => {
+    if (dayScrollRef.current) {
+      const el = dayScrollRef.current.querySelector('[data-selected="true"]');
+      if (el) el.scrollIntoView({ inline: 'center', behavior: 'smooth', block: 'nearest' });
+    }
+  }, [selectedDateKey]);
+
   // ─── EXERCISE TRACKING ─────────────────────────────
   const toggleExercise = (id) => updateWeek(w => ({ ...w, exercisesCompleted: { ...(w.exercisesCompleted || {}), [id]: !(w.exercisesCompleted || {})[id] } }));
+
+  const markAllExercisesForDay = (day, done) => {
+    updateWeek(w => {
+      const exercises = [];
+      (w.gymPlan?.[day]?.sections || []).forEach(sec => sec.exercises.forEach(e => exercises.push(e.id)));
+      const updated = { ...(w.exercisesCompleted || {}) };
+      exercises.forEach(id => { if (done) updated[id] = true; else delete updated[id]; });
+      return { ...w, exercisesCompleted: updated };
+    });
+    showToast(done ? `All ${day} exercises marked done` : `${day} exercises reset`);
+  };
 
   const getDayProgress = useCallback((day) => {
     if (!plan || !plan[day]) return { done: 0, total: 0, pct: 0 };
@@ -908,6 +1027,8 @@ function App() {
   const hasWeekData = weekData !== null;
   const prevKey = getWeekInfo(weekOffset - 1).key;
   const hasPrevWeekData = !!weekArchive[prevKey];
+  const selectedDateEntry = DATE_RANGE.find(d => d.dateKey === selectedDateKey);
+  const selectedDateLabel = selectedDateEntry ? selectedDateEntry.dateLabel : '';
 
   // Auth loading screen
   if (authLoading) {
@@ -977,7 +1098,7 @@ function App() {
               <div style={{ fontSize: 14, fontWeight: 700 }}>{weekInfo.label}</div>
               <div style={{ fontSize: 11, opacity: 0.7 }}>
                 {weekInfo.isCurrentWeek ? 'This Week' : weekOffset > 0 ? `${weekOffset} week${weekOffset > 1 ? 's' : ''} ahead` : `${Math.abs(weekOffset)} week${Math.abs(weekOffset) > 1 ? 's' : ''} ago`}
-                {!weekInfo.isCurrentWeek && <span onClick={goToCurrentWeek} style={{ marginLeft: 8, cursor: 'pointer', textDecoration: 'underline', opacity: 0.9 }}>Go to today</span>}
+                {!(selectedDateEntry && selectedDateEntry.isToday) && <span onClick={goToCurrentWeek} style={{ marginLeft: 8, cursor: 'pointer', textDecoration: 'underline', opacity: 0.9 }}>Go to today</span>}
               </div>
             </div>
             <button onClick={goToNextWeek} style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff', width: 32, height: 32, borderRadius: '50%', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>&gt;</button>
@@ -1033,20 +1154,35 @@ function App() {
           </div>
         )}
 
-        {/* DAY TABS */}
-        {hasWeekData && ['tracker', 'meals', 'stats'].includes(view) && (
-          <div style={{ display: 'flex', gap: 4, padding: '12px 0', overflowX: 'auto', scrollbarWidth: 'none' }}>
-            {DAYS.map(day => {
-              const p = view === 'meals' ? getMealDayProgress(day) : getDayProgress(day);
-              const sel = day === selectedDay;
-              const isToday = getToday() === day && weekInfo.isCurrentWeek;
+        {/* CONTINUOUS DAY SCROLL */}
+        {['tracker', 'meals', 'stats'].includes(view) && (
+          <div ref={dayScrollRef} className="day-scroll" style={{ display: 'flex', gap: 4, padding: '12px 0', overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+            {DATE_RANGE.map(entry => {
+              const sel = entry.dateKey === selectedDateKey;
+              // Get progress from the correct week's data
+              const wKey = getWeekInfo(entry.weekOffset).key;
+              const wd = weekArchive[wKey];
+              let p = { done: 0, total: 0, pct: 0 };
+              if (wd) {
+                if (view === 'meals') {
+                  const meals = wd.mealPlan?.[entry.dayName]?.meals || [];
+                  const total = meals.length;
+                  const done = meals.filter(m => (wd.mealsCompleted || {})[m.id]).length;
+                  p = { done, total, pct: total === 0 ? 0 : Math.round((done / total) * 100) };
+                } else {
+                  let total = 0, done = 0;
+                  (wd.gymPlan?.[entry.dayName]?.sections || []).forEach(sec => sec.exercises.forEach(e => { total++; if ((wd.exercisesCompleted || {})[e.id]) done++; }));
+                  p = { done, total, pct: total === 0 ? 0 : Math.round((done / total) * 100) };
+                }
+              }
               return (
-                <button key={day} onClick={() => setSelectedDay(day)}
-                  style={{ flex: '0 0 auto', padding: '8px 12px', minWidth: 58, border: sel ? '2px solid #e94560' : '2px solid transparent', borderRadius: 10, background: sel ? '#fff' : 'rgba(255,255,255,0.6)', cursor: 'pointer', textAlign: 'center', position: 'relative', boxShadow: sel ? '0 2px 8px rgba(233,69,96,0.2)' : 'none' }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: sel ? '#e94560' : '#666' }}>{day.slice(0, 3)}</div>
-                  <div style={{ fontSize: 10, color: '#999', marginTop: 2 }}>{p.pct}%</div>
-                  {isToday && <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', position: 'absolute', top: 4, right: 4 }} />}
-                  {p.pct === 100 && p.total > 0 && <div style={{ fontSize: 10, marginTop: 1 }}>✓</div>}
+                <button key={entry.dateKey} data-selected={sel ? 'true' : 'false'} onClick={() => selectDate(entry)}
+                  style={{ flex: '0 0 auto', padding: '6px 10px', minWidth: 56, border: sel ? '2px solid #e94560' : entry.isToday ? '2px solid #4ade80' : '2px solid transparent', borderRadius: 10, background: sel ? '#fff' : 'rgba(255,255,255,0.6)', cursor: 'pointer', textAlign: 'center', position: 'relative', boxShadow: sel ? '0 2px 8px rgba(233,69,96,0.2)' : 'none' }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: sel ? '#e94560' : '#666' }}>{entry.dayName.slice(0, 3)}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: sel ? '#e94560' : '#333', marginTop: 1 }}>{entry.dateLabel.split(' ')[1]}</div>
+                  <div style={{ fontSize: 9, color: '#999' }}>{entry.dateLabel.split(' ')[0]}</div>
+                  {p.total > 0 && <div style={{ fontSize: 9, color: p.pct === 100 ? '#10b981' : '#999', marginTop: 1, fontWeight: 600 }}>{p.pct === 100 ? '✓' : `${p.pct}%`}</div>}
+                  {entry.isToday && <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', position: 'absolute', top: 3, right: 3 }} />}
                 </button>
               );
             })}
@@ -1058,10 +1194,17 @@ function App() {
           <>
             <div style={{ background: dayColor, color: '#fff', borderRadius: 12, padding: '14px 16px', marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div><h2 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{selectedDay}</h2><p style={{ margin: '2px 0 0', fontSize: 13, opacity: 0.85 }}>{dayData.label}</p></div>
-                <div style={{ textAlign: 'right' }}><div style={{ fontSize: 26, fontWeight: 700 }}>{dayProgress.pct}%</div><div style={{ fontSize: 11, opacity: 0.8 }}>{dayProgress.done}/{dayProgress.total}</div></div>
+                <div><h2 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{selectedDay}{selectedDateLabel ? `, ${selectedDateLabel}` : ''}</h2><p style={{ margin: '2px 0 0', fontSize: 13, opacity: 0.85 }}>{dayData.label} — {dayProgress.done} done</p></div>
+                <div style={{ textAlign: 'right' }}><div style={{ fontSize: 26, fontWeight: 700 }}>{dayProgress.pct}%</div><div style={{ fontSize: 11, opacity: 0.8 }}>{dayProgress.done}/{dayProgress.total} done</div></div>
               </div>
               {dayData.warmup && <div style={{ marginTop: 10, background: 'rgba(255,255,255,0.15)', borderRadius: 8, padding: '8px 10px', fontSize: 12 }}><strong>Warm-up:</strong> {dayData.warmup}</div>}
+              {dayProgress.total > 0 && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button onClick={() => markAllExercisesForDay(selectedDay, true)} style={{ flex: 1, padding: '7px 10px', background: 'rgba(255,255,255,0.2)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                    ✓ Mark All Done
+                  </button>
+                </div>
+              )}
             </div>
 
             {dayData.sections.map((section, sIdx) => (
@@ -1072,9 +1215,14 @@ function App() {
                 </div>
                 {section.exercises.map(ex => (
                   <div key={ex.id} style={{ borderBottom: '1px solid #f5f5f5' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', gap: 10, opacity: completed[ex.id] ? 0.5 : 1, transition: 'opacity 0.3s' }}>
-                      <div onClick={() => toggleExercise(ex.id)} style={{ width: 24, height: 24, minWidth: 24, borderRadius: 6, border: completed[ex.id] ? 'none' : '2px solid #ddd', background: completed[ex.id] ? dayColor : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
-                        {completed[ex.id] && <span style={{ color: '#fff', fontSize: 14 }}>✓</span>}
+                    <div style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', gap: 10, opacity: completed[ex.id] ? 0.55 : 1, transition: 'opacity 0.3s' }}>
+                      <div onClick={() => toggleExercise(ex.id)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', minWidth: 44 }}>
+                        <div style={{ width: 26, height: 26, borderRadius: 7, border: completed[ex.id] ? 'none' : '2px solid #ddd', background: completed[ex.id] ? dayColor : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          {completed[ex.id] && <span style={{ color: '#fff', fontSize: 14 }}>✓</span>}
+                        </div>
+                        <span style={{ fontSize: 9, fontWeight: 600, marginTop: 2, color: completed[ex.id] ? dayColor : '#ccc' }}>
+                          {completed[ex.id] ? 'Done' : 'Mark'}
+                        </span>
                       </div>
                       {editingId === ex.id ? (
                         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1109,7 +1257,7 @@ function App() {
                       )}
                     </div>
                     {expandedId === ex.id && (ex.desc || ex.tips) && (
-                      <div style={{ padding: '0 14px 12px 48px' }}>
+                      <div style={{ padding: '0 14px 12px 68px' }}>
                         {ex.desc && <div style={{ background: '#f8f9ff', borderRadius: 8, padding: '10px 12px', marginBottom: ex.tips ? 6 : 0 }}><div style={{ fontSize: 11, fontWeight: 700, color: dayColor, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>How to do it</div><div style={{ fontSize: 12, color: '#444', lineHeight: 1.5 }}>{ex.desc}</div></div>}
                         {ex.tips && <div style={{ background: '#fff8e1', borderRadius: 8, padding: '10px 12px', borderLeft: '3px solid #f59e0b' }}><div style={{ fontSize: 11, fontWeight: 700, color: '#b45309', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Watch out</div><div style={{ fontSize: 12, color: '#666', lineHeight: 1.5 }}>{ex.tips}</div></div>}
                       </div>
@@ -1120,7 +1268,6 @@ function App() {
             ))}
 
             <div style={{ display: 'flex', gap: 8, padding: '8px 0 20px' }}>
-              <button onClick={() => updateWeek(w => ({ ...w, exercisesCompleted: {} }))} style={{ ...s.btn('#fff', '#666'), border: '1px solid #ddd' }}>Reset Week</button>
               <button onClick={() => setShowShareModal(true)} style={s.btn('#1a1a2e')}>Share</button>
             </div>
           </>
@@ -1131,7 +1278,7 @@ function App() {
           <>
             <div style={{ background: 'linear-gradient(135deg, #059669, #10b981)', color: '#fff', borderRadius: 12, padding: '14px 16px', marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div><h2 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{selectedDay} Meals</h2><p style={{ margin: '2px 0 0', fontSize: 13, opacity: 0.85 }}>{mealDayData?.meals?.length || 0} meals — {mealProgress.done} followed</p></div>
+                <div><h2 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{selectedDay}{selectedDateLabel ? `, ${selectedDateLabel}` : ''}</h2><p style={{ margin: '2px 0 0', fontSize: 13, opacity: 0.85 }}>{mealDayData?.meals?.length || 0} meals — {mealProgress.done} followed</p></div>
                 <div style={{ textAlign: 'right' }}><div style={{ fontSize: 26, fontWeight: 700 }}>{mealProgress.pct}%</div><div style={{ fontSize: 11, opacity: 0.8 }}>{mealProgress.done}/{mealProgress.total} followed</div></div>
               </div>
               {/* Quick mark all buttons */}
@@ -1139,9 +1286,6 @@ function App() {
                 <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                   <button onClick={() => markAllMealsForDay(selectedDay, true)} style={{ flex: 1, padding: '7px 10px', background: 'rgba(255,255,255,0.2)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
                     ✓ Mark All Followed
-                  </button>
-                  <button onClick={() => markAllMealsForDay(selectedDay, false)} style={{ flex: 1, padding: '7px 10px', background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: 500, cursor: 'pointer' }}>
-                    Reset Day
                   </button>
                 </div>
               )}
@@ -1610,24 +1754,6 @@ function App() {
               </div>
             )}
 
-            {/* Reset all meals */}
-            <div style={{ ...s.card, padding: 16, borderLeft: '4px solid #ef4444' }}>
-              <h3 style={{ margin: '0 0 6px', fontSize: 15, color: '#ef4444' }}>Reset Meal Plans</h3>
-              <p style={{ margin: '0 0 12px', fontSize: 13, color: '#888' }}>Delete all meal plans across all weeks. Workout plans will not be affected.</p>
-              {confirmResetAllMeals ? (
-                <div>
-                  <p style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 600, color: '#ef4444' }}>Are you sure? This will permanently delete all meal data for every week.</p>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button onClick={resetAllMeals} style={{ ...s.btn('#ef4444'), flex: 1 }}>Yes, Delete All Meals</button>
-                    <button onClick={() => setConfirmResetAllMeals(false)} style={{ ...s.btn('#eee', '#333'), flex: 1 }}>Cancel</button>
-                  </div>
-                </div>
-              ) : (
-                <button onClick={() => setConfirmResetAllMeals(true)} style={{ ...s.btn('#fff', '#ef4444'), border: '1px solid #ef4444' }}>
-                  Reset All Meal Plans
-                </button>
-              )}
-            </div>
           </div>
         )}
       </div>
