@@ -8,8 +8,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Health Tracker">
-  <link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiSGVhbHRoIFRyYWNrZXIgLSBBeXVzaCIsInNob3J0X25hbWUiOiJIZWFsdGggVHJhY2tlciIsImRlc2NyaXB0aW9uIjoiVHJhY2sgd29ya291dHMsIG1lYWxzLCBhbmQgd2Vla2x5IGNvbnNpc3RlbmN5Iiwic3RhcnRfdXJsIjoiLiIsImRpc3BsYXkiOiJzdGFuZGFsb25lIiwiYmFja2dyb3VuZF9jb2xvciI6IiNmNWY1ZjciLCJ0aGVtZV9jb2xvciI6IiMxYTFhMmUiLCJvcmllbnRhdGlvbiI6InBvcnRyYWl0LXByaW1hcnkiLCJpY29ucyI6W119">
   <title>Health Tracker - Ayush</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='96' fill='%231a1a2e'/%3E%3Ctext x='256' y='320' text-anchor='middle' font-size='280' font-family='Arial'%3E%F0%9F%8F%8B%EF%B8%8F%3C/text%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='96' fill='%231a1a2e'/%3E%3Ctext x='256' y='320' text-anchor='middle' font-size='280' font-family='Arial'%3E%F0%9F%8F%8B%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <style>
     * {
       margin: 0;
@@ -76,6 +77,82 @@
     window.fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
     window.fbDb = firebase.database();
     window.fbGoogleProvider = new firebase.auth.GoogleAuthProvider();
+
+    // ─── PWA: Generate manifest & register service worker ─────
+    // Create a 512x512 PNG icon using canvas
+    (function setupPWA() {
+      // Generate icon as data URL
+      const canvas = document.createElement('canvas');
+      canvas.width = 512; canvas.height = 512;
+      const ctx = canvas.getContext('2d');
+      // Background
+      ctx.fillStyle = '#1a1a2e';
+      ctx.beginPath();
+      ctx.roundRect(0, 0, 512, 512, 96);
+      ctx.fill();
+      // Emoji
+      ctx.font = '260px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('\u{1F3CB}\uFE0F', 256, 270);
+      const iconUrl = canvas.toDataURL('image/png');
+
+      // Create manifest blob
+      const manifest = {
+        name: 'Health Tracker - Ayush',
+        short_name: 'Health Tracker',
+        description: 'Track workouts, meals, and weekly consistency',
+        start_url: location.href.split('?')[0],
+        scope: location.href.substring(0, location.href.lastIndexOf('/') + 1),
+        display: 'standalone',
+        background_color: '#f5f5f7',
+        theme_color: '#1a1a2e',
+        orientation: 'portrait-primary',
+        icons: [
+          { src: iconUrl, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+        ]
+      };
+      const manifestBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+      const manifestUrl = URL.createObjectURL(manifestBlob);
+      const link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = manifestUrl;
+      document.head.appendChild(link);
+
+      // Register a minimal service worker for PWA installability
+      if ('serviceWorker' in navigator) {
+        const swCode = `
+          const CACHE_NAME = 'health-tracker-v1';
+          self.addEventListener('install', (e) => { self.skipWaiting(); });
+          self.addEventListener('activate', (e) => { e.waitUntil(clients.claim()); });
+          self.addEventListener('fetch', (e) => {
+            e.respondWith(
+              caches.match(e.request).then(r => r || fetch(e.request).then(resp => {
+                if (resp.ok && e.request.method === 'GET' && !e.request.url.includes('firebase')) {
+                  const clone = resp.clone();
+                  caches.open(CACHE_NAME).then(c => c.put(e.request, clone));
+                }
+                return resp;
+              }).catch(() => caches.match(e.request)))
+            );
+          });
+        `;
+        const swBlob = new Blob([swCode], { type: 'application/javascript' });
+        const swUrl = URL.createObjectURL(swBlob);
+        navigator.serviceWorker.register(swUrl, { scope: location.href.substring(0, location.href.lastIndexOf('/') + 1) })
+          .then(() => console.log('SW registered'))
+          .catch(e => console.log('SW registration skipped:', e.message));
+      }
+
+      // Store install prompt for later use
+      window.deferredInstallPrompt = null;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.deferredInstallPrompt = e;
+        // Dispatch custom event so React can update UI
+        window.dispatchEvent(new Event('pwainstallready'));
+      });
+    })();
   </script>
 
   <script type="text/babel">
@@ -114,11 +191,11 @@ const DEFAULT_PLAN = {
   },
   Wednesday: {
     label: "Back, Biceps & Obliques",
-    warmup: "5 min treadmill walk (incline 3-5%) + band pull-aparts",
+    warmup: "5 min treadmill walk (incline 3-5%) + prone Y-T-W raises (10 each)",
     sections: [
       { name: "Strength Training", exercises: [
         { id: "w1", name: "Lat Pulldowns (wide grip)", sets: "3 x 10-12", rest: "60-90s", desc: "Pull bar to upper chest, squeezing shoulder blades. Lean back slightly.", tips: "Pull to FRONT, never behind neck." },
-        { id: "w2", name: "Seated Cable Rows", sets: "3 x 10-12", rest: "60-90s", desc: "Pull handle to lower chest, squeeze shoulder blades together.", tips: "Keep torso stationary. Neutral spine." },
+        { id: "w2", name: "Bent-Over Dumbbell Rows", sets: "3 x 10-12", rest: "60-90s", desc: "Hinge at hips with flat back, hold dumbbells hanging down. Pull both dumbbells to lower ribs, squeezing shoulder blades together at top. Lower slowly.", tips: "Keep back flat at 45-degree angle. Don't round your spine. Pull elbows past your torso for full contraction." },
         { id: "w3", name: "Single-Arm Dumbbell Row", sets: "3 x 10 each", rest: "60s", desc: "One knee and hand on bench. Pull dumbbell to hip, leading with elbow.", tips: "Keep back flat. Don't rotate torso." },
         { id: "w4", name: "Dumbbell Bicep Curls", sets: "3 x 12", rest: "60s", desc: "Curl up keeping upper arms stationary. Squeeze at top, lower slowly.", tips: "Don't swing body. Elbows pinned." },
         { id: "w5", name: "Hammer Curls", sets: "3 x 12", rest: "60s", desc: "Palms facing each other. Curl up maintaining neutral grip.", tips: "No swinging. Builds arm thickness." },
@@ -546,6 +623,7 @@ function App() {
   // ─── FIREBASE DB SYNC ────────────────────────────────
   const dbSyncRef = useRef(false);
   const skipNextSave = useRef(false);
+  const saveTimerRef = useRef(null);
 
   // Load data from Firebase when user signs in
   useEffect(() => {
@@ -561,12 +639,31 @@ function App() {
     });
   }, [user]);
 
-  // Save to Firebase whenever weekArchive changes
+  // Save to Firebase whenever weekArchive changes (debounced for rapid toggles)
   useEffect(() => {
     if (!user || !dbSyncRef.current) return;
     if (skipNextSave.current) { skipNextSave.current = false; return; }
-    const ref = window.fbDb.ref('users/' + user.uid + '/weekArchive');
-    ref.set(weekArchive).catch(e => console.error('Save failed:', e));
+    // Clear any pending save
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    // Debounce save by 500ms so rapid toggles batch into one write
+    saveTimerRef.current = setTimeout(() => {
+      const ref = window.fbDb.ref('users/' + user.uid + '/weekArchive');
+      ref.set(weekArchive).catch(e => console.error('Save failed:', e));
+    }, 500);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, [weekArchive, user]);
+
+  // Also save immediately before the page unloads
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (user && dbSyncRef.current) {
+        const ref = window.fbDb.ref('users/' + user.uid + '/weekArchive');
+        // Use navigator.sendBeacon-style sync write
+        try { ref.set(weekArchive); } catch(e) {}
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [weekArchive, user]);
 
   const weekInfo = getWeekInfo(weekOffset);
@@ -604,6 +701,26 @@ function App() {
   const dayScrollRef = useRef(null);
   const [view, setView] = useState('tracker');
   const [toast, setToast] = useState('');
+  const [canInstall, setCanInstall] = useState(!!window.deferredInstallPrompt);
+
+  // Listen for PWA install readiness
+  useEffect(() => {
+    const handler = () => setCanInstall(true);
+    window.addEventListener('pwainstallready', handler);
+    return () => window.removeEventListener('pwainstallready', handler);
+  }, []);
+
+  const installApp = async () => {
+    const prompt = window.deferredInstallPrompt;
+    if (!prompt) return;
+    prompt.prompt();
+    const result = await prompt.userChoice;
+    if (result.outcome === 'accepted') {
+      setCanInstall(false);
+      window.deferredInstallPrompt = null;
+      showToast('App installed!');
+    }
+  };
   const [showAddModal, setShowAddModal] = useState(false);
   const [addTarget, setAddTarget] = useState({ day: '', sectionIdx: 0 });
   const [newExercise, setNewExercise] = useState({ name: '', sets: '', rest: '60s', desc: '', tips: '' });
@@ -714,13 +831,21 @@ function App() {
     setWeekOffset(dateEntry.weekOffset);
   };
 
-  // Auto-scroll to selected date
-  useEffect(() => {
+  // Auto-scroll to selected date (with retry for initial render)
+  const scrollToSelected = useCallback(() => {
     if (dayScrollRef.current) {
       const el = dayScrollRef.current.querySelector('[data-selected="true"]');
-      if (el) el.scrollIntoView({ inline: 'center', behavior: 'smooth', block: 'nearest' });
+      if (el) { el.scrollIntoView({ inline: 'center', behavior: 'smooth', block: 'nearest' }); return true; }
     }
-  }, [selectedDateKey]);
+    return false;
+  }, []);
+  useEffect(() => {
+    if (!scrollToSelected()) {
+      // Retry after a short delay if DOM isn't ready yet (e.g., after auth)
+      const t = setTimeout(scrollToSelected, 300);
+      return () => clearTimeout(t);
+    }
+  }, [selectedDateKey, view, user, authLoading, scrollToSelected]);
 
   // ─── EXERCISE TRACKING ─────────────────────────────
   const toggleExercise = (id) => updateWeek(w => ({ ...w, exercisesCompleted: { ...(w.exercisesCompleted || {}), [id]: !(w.exercisesCompleted || {})[id] } }));
@@ -1090,6 +1215,11 @@ function App() {
                   </button>
                 ))}
               </div>
+              {canInstall && (
+                <button onClick={installApp} title="Install App" style={{ background: 'rgba(74,222,128,0.25)', border: '1px solid rgba(74,222,128,0.5)', color: '#4ade80', padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                  Install
+                </button>
+              )}
               {user.photoURL ? (
                 <img src={user.photoURL} onClick={signOut} title="Sign out" style={{ width: 30, height: 30, borderRadius: '50%', cursor: 'pointer', border: '2px solid rgba(255,255,255,0.3)' }} referrerPolicy="no-referrer" />
               ) : (
@@ -1188,10 +1318,10 @@ function App() {
                 <React.Fragment key={entry.dateKey}>
                   {showSeparator && <div style={{ width: 2, minWidth: 2, background: '#ddd', borderRadius: 1, margin: '4px 2px' }} />}
                   <button data-selected={sel ? 'true' : 'false'} onClick={() => selectDate(entry)}
-                    style={{ flex: '0 0 auto', padding: '6px 10px', minWidth: 56, border: sel ? '2px solid #e94560' : entry.isToday ? '2px solid #4ade80' : '2px solid transparent', borderRadius: 10, background: sel ? '#fff' : isTuesday ? 'rgba(233,69,96,0.08)' : 'rgba(255,255,255,0.6)', cursor: 'pointer', textAlign: 'center', position: 'relative', boxShadow: sel ? '0 2px 8px rgba(233,69,96,0.2)' : 'none' }}>
-                    <div style={{ fontSize: 10, fontWeight: 600, color: sel ? '#e94560' : '#666' }}>{entry.dayName.slice(0, 3)}</div>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: sel ? '#e94560' : '#333', marginTop: 1 }}>{entry.dateLabel.split(' ')[1]}</div>
-                    <div style={{ fontSize: 9, color: '#999' }}>{entry.dateLabel.split(' ')[0]}</div>
+                    style={{ flex: '0 0 auto', padding: '6px 10px', minWidth: 56, border: sel ? (entry.isToday ? '2px solid #4ade80' : '2px solid #e94560') : entry.isToday ? '2px solid #4ade80' : '2px solid transparent', borderRadius: 10, background: sel ? '#fff' : entry.isToday ? 'rgba(74,222,128,0.1)' : isTuesday ? 'rgba(233,69,96,0.08)' : 'rgba(255,255,255,0.6)', cursor: 'pointer', textAlign: 'center', position: 'relative', boxShadow: sel ? (entry.isToday ? '0 2px 8px rgba(74,222,128,0.3)' : '0 2px 8px rgba(233,69,96,0.2)') : 'none' }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: sel ? (entry.isToday ? '#059669' : '#e94560') : '#666' }}>{entry.dayName.slice(0, 3)}</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: sel ? (entry.isToday ? '#059669' : '#e94560') : '#333', marginTop: 1 }}>{entry.dateLabel.split(' ')[1]}</div>
+                    <div style={{ fontSize: 9, color: sel && entry.isToday ? '#059669' : '#999' }}>{entry.dateLabel.split(' ')[0]}</div>
                     {p.total > 0 && <div style={{ fontSize: 9, color: p.pct === 100 ? '#10b981' : '#999', marginTop: 1, fontWeight: 600 }}>{p.pct === 100 ? '✓' : `${p.pct}%`}</div>}
                     {entry.isToday && <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', position: 'absolute', top: 3, right: 3 }} />}
                   </button>
